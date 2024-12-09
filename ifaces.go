@@ -1,28 +1,20 @@
 package dropspy
 
 import (
-	"fmt"
-
-	"github.com/jsimonetti/rtnetlink"
+	"net"
 )
 
-// LinkList returns a map from interface index to interface name
+// LinkList returns a map from interface index to interface name.
 func LinkList() (map[uint32]string, error) {
-	conn, err := rtnetlink.Dial(nil)
-	if err != nil {
-		return nil, fmt.Errorf("link list: %w", err)
-	}
-	defer conn.Close()
-
-	msg, err := conn.Link.List()
-	if err != nil {
-		return nil, fmt.Errorf("link list: %w", err)
-	}
-
 	ret := map[uint32]string{}
 
-	for _, link := range msg {
-		ret[link.Index] = link.Attributes.Name
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, iface := range ifaces {
+		ret[uint32(iface.Index)] = iface.Name
 	}
 
 	return ret, nil

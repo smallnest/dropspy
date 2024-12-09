@@ -25,7 +25,7 @@ func TestHello(t *testing.T) {
 }
 
 func TestSession(t *testing.T) {
-	s, err := NewSession()
+	s, err := NewSession(nil)
 	if err != nil {
 		t.Fatalf("init: %s", err)
 	}
@@ -39,7 +39,7 @@ func TestSession(t *testing.T) {
 }
 
 func TestWatch(t *testing.T) {
-	s, err := NewSession()
+	s, err := NewSession(nil)
 	if err != nil {
 		t.Fatalf("init: %s", err)
 	}

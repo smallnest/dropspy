@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,38 +13,41 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"github.com/superfly/dropspy"
+	"github.com/smallnest/dropspy"
+	"github.com/spf13/pflag"
 )
 
+// filter struct is used to store filter conditions
 type filter struct {
-	ifaces     map[uint32]bool
-	min, max   uint
-	xSym, iSym []*regexp.Regexp
-	bpf        *pcap.BPF
+	ifaces     map[uint32]bool  // Mapping of interface indices
+	min, max   uint             // Minimum and maximum packet length
+	xSym, iSym []*regexp.Regexp // Exclude and include symbol regex
+	bpf        *pcap.BPF        // BPF filter
 }
 
+// Match method is used to check if a packet matches the filter conditions
 func (f *filter) Match(pa *dropspy.PacketAlert) bool {
 	if len(f.ifaces) > 0 {
-		if !f.ifaces[pa.Link()] {
+		if !f.ifaces[pa.Link()] { // Check if the packet is from the specified interface
 			return false
 		}
 	}
 
-	plen := uint(pa.Length())
+	plen := uint(pa.Length()) // Get packet length
 
-	if f.min != 0 && plen < f.min {
+	if f.min != 0 && plen < f.min { // Check minimum length
 		return false
 	}
 
-	if f.max != 0 && plen > f.max {
+	if f.max != 0 && plen > f.max { // Check maximum length
 		return false
 	}
 
-	sym := pa.Symbol()
+	sym := pa.Symbol() // Get packet symbol
 
 	if len(f.xSym) != 0 {
 		for _, rx := range f.xSym {
-			if rx.MatchString(sym) {
+			if rx.MatchString(sym) { // Check if it matches the exclude symbol
 				return false
 			}
 		}
@@ -53,142 +55,138 @@ func (f *filter) Match(pa *dropspy.PacketAlert) bool {
 
 	if len(f.iSym) != 0 {
 		for _, rx := range f.iSym {
-			if !rx.MatchString(sym) {
+			if !rx.MatchString(sym) { // Check if it matches the include symbol
 				return false
 			}
 		}
 	}
 
 	if f.bpf != nil {
-		packet := pa.Packet()
+		packet := pa.Packet() // Get raw packet
 
 		ci := gopacket.CaptureInfo{
-			CaptureLength: len(packet),
-			Length:        int(plen),
+			CaptureLength: len(packet), // Capture length
+			Length:        int(plen),   // Packet length
 		}
 
-		if !f.bpf.Matches(ci, packet) {
+		if !f.bpf.Matches(ci, packet) { // Check BPF filter
 			return false
 		}
 	}
 
-	return true
-}
-
-type sliceArg []string
-
-func (sa *sliceArg) String() string {
-	return strings.Join([]string(*sa), ",")
-}
-
-func (sa *sliceArg) Set(arg string) error {
-	*sa = append(*sa, arg)
-	return nil
+	return true // Return true if all conditions match
 }
 
 var (
-	packetModeTruncation int = 100
+	packetModeTruncation int = 100 // Packet mode truncation length
 )
 
 func main() {
 	var (
-		printHex bool
-		ifaces   sliceArg
-		xsyms    sliceArg
-		isyms    sliceArg
-		maxDrops uint64
-		timeout  string
-		hw, sw   bool
+		printHex bool     // Whether to print hex data
+		ifaces   []string // Interface parameters
+		xsyms    []string // Exclude symbol parameters
+		isyms    []string // Include symbol parameters
+		maxDrops uint64   // Maximum drop count
+		timeout  string   // Capture timeout
+		hw, sw   bool     // Hardware and software drop flags
 
-		filter filter
+		filter filter // Filter instance
 
-		err error
+		err error // Error variable
 	)
 
-	flag.Var(&ifaces, "iface", "show only drops on this interface (may be repeated)")
-	flag.Var(&xsyms, "xsym", "exclude drops from syms matching regexp (may be repeated)")
-	flag.Var(&isyms, "isym", "include drops from syms matching regexp (may be repeated)")
-	flag.UintVar(&filter.min, "minlen", 0, "minimum packet length for drops")
-	flag.UintVar(&filter.max, "maxlen", 0, "maximum packet length for drops")
-	flag.Uint64Var(&maxDrops, "count", 0, "maximum drops to record")
-	flag.StringVar(&timeout, "timeout", "", "duration to capture for (300ms, 2h15m, &c)")
-	flag.BoolVar(&hw, "hw", true, "record hardware drops")
-	flag.BoolVar(&sw, "sw", true, "record software drops")
-	flag.BoolVar(&printHex, "hex", false, "print hex dumps of matching packets")
+	// Define command line flags
+	pflag.StringArrayVarP(&ifaces, "iface", "I", nil, "show only drops on this interface (may be repeated)") // Show only drops on specified interface
+	pflag.StringArrayVar(&xsyms, "xsym", nil, "exclude drops from syms matching regexp (may be repeated)")   // Exclude symbols matching regex
+	pflag.StringArrayVar(&isyms, "isym", nil, "include drops from syms matching regexp (may be repeated)")   // Include symbols matching regex
+	pflag.UintVar(&filter.min, "minlen", 0, "minimum packet length for drops")                               // Set minimum packet length
+	pflag.UintVar(&filter.max, "maxlen", 0, "maximum packet length for drops")                               // Set maximum packet length
+	pflag.Uint64VarP(&maxDrops, "count", "c", 0, "maximum drops to record")                                  // Set maximum drop count
+	pflag.StringVarP(&timeout, "timeout", "w", "", "duration to capture for (300ms, 2h15m, &c)")             // Set capture timeout
+	pflag.BoolVar(&hw, "hw", true, "record hardware drops")                                                  // Record hardware drops
+	pflag.BoolVar(&sw, "sw", true, "record software drops")                                                  // Record software drops
+	pflag.BoolVar(&printHex, "hex", false, "print hex dumps of matching packets")                            // Print hex dumps of matching packets
+	// pflag.BoolP("help", "h", false, "")
 
-	flag.Usage = func() {
+	// Set usage instructions
+	pflag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s: Report packet drops from Linux kernel DM_MON.\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "%s [flags] [pcap filter]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "ie: %s -hex -iface lo udp port 53\n", os.Args[0])
-		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "ie: %s --hex -I eth0 udp port 53\n", os.Args[0])
+		pflag.PrintDefaults() // Print default values of all flags
 	}
 
-	flag.Parse()
+	pflag.ErrHelp = fmt.Errorf("")
+	pflag.Parse() // Parse command line flags
 
-	pcapExpr := strings.Join(flag.Args(), " ")
+	pcapExpr := strings.Join(pflag.Args(), " ") // Get pcap filter expression
 	if pcapExpr != "" {
-		filter.bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, packetModeTruncation, pcapExpr)
+		filter.bpf, err = pcap.NewBPF(layers.LinkTypeEthernet, packetModeTruncation, pcapExpr) // Create BPF filter
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "pcap expression: %s\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "pcap expression: %s\n", err) // Print error message
+			os.Exit(1)                                           // Exit program
 		}
 	}
 
 	if len([]string(xsyms)) > 0 && len([]string(isyms)) > 0 {
-		fmt.Fprintf(os.Stderr, "-xsym and -isym are mutually exclusive\n")
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "-xsym and -isym are mutually exclusive\n") // Exclude and include symbols cannot be used together
+		os.Exit(1)                                                         // Exit program
 	}
 
+	// Compile exclude symbol regex
 	for _, symexpr := range []string(xsyms) {
-		rx, err := regexp.Compile(symexpr)
+		rx, err := regexp.Compile(symexpr) // Compile regex
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "regexp compile %s: %s\n", symexpr, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "regexp compile %s: %s\n", symexpr, err) // Print error message
+			os.Exit(1)                                                      // Exit program
 		}
 
-		filter.xSym = append(filter.xSym, rx)
+		filter.xSym = append(filter.xSym, rx) // Add to filter
 	}
 
+	// Compile include symbol regex
 	for _, symexpr := range []string(isyms) {
-		rx, err := regexp.Compile(symexpr)
+		rx, err := regexp.Compile(symexpr) // Compile regex
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "regexp compile %s: %s\n", symexpr, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "regexp compile %s: %s\n", symexpr, err) // Print error message
+			os.Exit(1)                                                      // Exit program
 		}
 
-		filter.iSym = append(filter.iSym, rx)
+		filter.iSym = append(filter.iSym, rx) // Add to filter
 	}
 
-	links, err := dropspy.LinkList()
+	links, err := dropspy.LinkList() // Get network interface list
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "retrieve links: %s\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "retrieve links: %s\n", err) // Print error message
+		os.Exit(1)                                          // Exit program
 	}
 
-	filter.ifaces = map[uint32]bool{}
+	filter.ifaces = map[uint32]bool{} // Initialize interface mapping
 
+	// Handle specified interfaces
 	for _, iface := range []string(ifaces) {
 		var rx *regexp.Regexp
 
 		if strings.HasPrefix(iface, "/") && strings.HasSuffix(iface, "/") {
-			rx, err = regexp.Compile(iface[1 : len(iface)-2])
+			rx, err = regexp.Compile(iface[1 : len(iface)-2]) // Compile regex
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "compile interface regexp for %s: %s\n", iface[1:len(iface)-2], err)
-				os.Exit(1)
+				fmt.Fprintf(os.Stderr, "compile interface regexp for %s: %s\n", iface[1:len(iface)-2], err) // Print error message
+				os.Exit(1)                                                                                  // Exit program
 			}
 		} else {
-			rx, err = regexp.Compile("^" + iface + "$")
+			rx, err = regexp.Compile("^" + iface + "$") // Compile exact match regex
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "compile interface regexp for %s: %s\n", iface, err)
-				os.Exit(1)
+				fmt.Fprintf(os.Stderr, "compile interface regexp for %s: %s\n", iface, err) // Print error message
+				os.Exit(1)                                                                  // Exit program
 			}
 		}
 
 		found := false
 		for k, v := range links {
 			if v == iface {
-				if rx.MatchString(v) {
-					filter.ifaces[k] = true
+				if rx.MatchString(v) { // Check if it matches
+					filter.ifaces[k] = true // Add interface to filter
 					found = true
 					break
 				}
@@ -196,75 +194,75 @@ func main() {
 		}
 
 		if !found {
-			fmt.Fprintf(os.Stderr, "no such interface '%s'\n", iface)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "no such interface '%s'\n", iface) // Print error message
+			os.Exit(1)                                                // Exit program
 		}
 	}
 
-	session, err := dropspy.NewSession()
+	session, err := dropspy.NewSession(links) // Create new dropspy session
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "connect to drop_mon: %s\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "connect to drop_mon: %s\n", err) // Print error message
+		os.Exit(1)                                               // Exit program
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
+	sigCh := make(chan os.Signal, 1)   // Create signal channel
+	signal.Notify(sigCh, os.Interrupt) // Listen for interrupt signal
 	go func() {
-		_ = <-sigCh
-		fmt.Fprintf(os.Stderr, "got C-c: cleaning up and exiting\n")
-		session.Stop(true, true)
-		os.Exit(1)
+		_ = <-sigCh                                                  // Wait for signal
+		fmt.Fprintf(os.Stderr, "got C-c: cleaning up and exiting\n") // Print cleanup message
+		session.Stop(true, true)                                     // Stop session
+		os.Exit(1)                                                   // Exit program
 	}()
 
 	defer func() {
-		session.Stop(true, true)
+		session.Stop(true, true) // Ensure session stops on exit
 	}()
 
-	session.Stop(true, true)
-
-	err = session.Start(sw, hw)
+	err = session.Start(sw, hw) // Start session
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "enable drop_mon alerts: %s\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "enable drop_mon alerts: %s\n", err) // Print error message
+		os.Exit(1)                                                  // Exit program
 	}
 
-	var deadline time.Time
+	var deadline time.Time // Define deadline
 
 	if timeout != "" {
-		dur, err := time.ParseDuration(timeout)
+		dur, err := time.ParseDuration(timeout) // Parse timeout
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "can't parse timeout: %s\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "can't parse timeout: %s\n", err) // Print error message
+			os.Exit(1)                                               // Exit program
 		}
 
-		deadline = time.Now().Add(dur)
+		deadline = time.Now().Add(dur) // Set deadline
 	}
 
-	dropCount := uint64(0)
+	dropCount := uint64(0) // Initialize drop count
 
 	for {
 		err = session.ReadUntil(deadline, func(pa dropspy.PacketAlert) bool {
-			if filter.Match(&pa) {
-				dropCount += 1
+			if filter.Match(&pa) { // Check if packet matches filter conditions
+				dropCount += 1 // Increment drop count
 
-				log.Printf("drop on iface:%s at %s:%016x", links[pa.Link()], pa.Symbol(), pa.PC())
+				// Record drop information
+				pa.Output(links)
 				if printHex {
-					fmt.Println(hex.Dump(pa.L3Packet()))
+					fmt.Println(hex.Dump(pa.L3Packet())) // Print hex data
 				}
+				log.Println("----------------") // Separator
 
-				if maxDrops != 0 && dropCount == maxDrops {
-					fmt.Fprintf(os.Stderr, "maximum drops reached, exiting\n")
-					return false
+				if maxDrops != 0 && dropCount == maxDrops { // Check if maximum drop count is reached
+					fmt.Fprintf(os.Stderr, "maximum drops reached, exiting\n") // Print message
+					return false                                               // Stop reading
 				}
 			}
 
-			return true
+			return true // Continue reading
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "read: %s\n", err)
-			time.Sleep(250 * time.Millisecond)
+			fmt.Fprintf(os.Stderr, "read: %s\n", err) // Print error message
+			time.Sleep(250 * time.Millisecond)        // Pause for a while
 		} else {
-			return
+			return // Exit loop
 		}
 	}
 }

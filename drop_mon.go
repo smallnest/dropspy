@@ -2,6 +2,7 @@ package dropspy
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/mdlayher/netlink"
 )
 
-// these constants were all pulled out of 5.6 mainline
+// These constants are extracted from the 5.6 mainline
 // include/uapi/linux/net_dropmon.h
 
 const (
@@ -48,13 +49,15 @@ const (
 	ATTR_HW_TRAP_COUNT      /* u32 */
 	ATTR_SW_DROPS           /* flag */ // 20
 	ATTR_HW_DROPS           /* flag */
+	ATTR_FLOW_ACTION_COOKIE /* binary */
+	ATTR_DROP_REASON        /* string */ // New: Drop reason
 )
 
 const (
 	GRP_ALERT = 1
 
-	// i don't know how to parse SUMMARY mode so we just
-	// always use PACKET, which gives us payloads (but requires
+	// I don't know how to parse SUMMARY mode, so we always
+	// use PACKET, which gives us payloads (but requires
 	// privileges)
 	ALERT_MODE_SUMMARY = 0
 	ALERT_MODE_PACKET  = 1
@@ -77,18 +80,20 @@ type Session struct {
 	conn  *genetlink.Conn
 	fam   uint16
 	group uint32
+	links map[uint32]string
 }
 
 // NewSession connects to generic netlink and looks up the DM_NET
 // family so we can issue requests
-func NewSession() (*Session, error) {
+func NewSession(links map[uint32]string) (*Session, error) {
 	conn, err := genetlink.Dial(nil)
 	if err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
 
 	s := &Session{
-		conn: conn,
+		conn:  conn,
+		links: links,
 	}
 
 	f, g, err := s.dropMonitorLookup()
@@ -102,6 +107,7 @@ func NewSession() (*Session, error) {
 	return s, nil
 }
 
+// dropMonitorLookup looks up the DM_NET family and group
 func (s *Session) dropMonitorLookup() (famid uint16, group uint32, err error) {
 	fam, err := s.conn.GetFamily("NET_DM")
 	if err != nil {
@@ -115,6 +121,7 @@ func (s *Session) dropMonitorLookup() (famid uint16, group uint32, err error) {
 	return fam.ID, fam.Groups[0].ID, nil
 }
 
+// decodeConfig decodes the configuration
 func decodeConfig(raw []byte) (map[int]interface{}, error) {
 	dec, err := netlink.NewAttributeDecoder(raw)
 	if err != nil {
@@ -141,9 +148,8 @@ func decodeConfig(raw []byte) (map[int]interface{}, error) {
 	return ret, nil
 }
 
-// Config returns a raw bundle of attrs (see ATTR_ constants)
-// holding the current DM_NET configuration (which is just the
-// alert mode and the packet snap length and queue length)
+// Config returns the raw attribute bundle of the current DM_NET configuration (see ATTR_ constants)
+// Only includes alert mode, packet snapshot length, and queue length
 func (s *Session) Config() (map[int]interface{}, error) {
 	err := s.req(CMD_CONFIG_GET, nil, false)
 	if err != nil {
@@ -163,6 +169,7 @@ func (s *Session) Config() (map[int]interface{}, error) {
 	return conf, nil
 }
 
+// req sends a request to netlink
 func (s *Session) req(cmd uint8, data []byte, ack bool) error {
 	flags := netlink.Request
 	if ack {
@@ -178,43 +185,37 @@ func (s *Session) req(cmd uint8, data []byte, ack bool) error {
 	return err
 }
 
-// Start puts DM_NET into packet alerting mode (so we get per-packet
-// alerts, and the raw contents of dropped packets), issues
-// an acknowledged CMD_START to start monitoring, and then
-// joins the GRP_ALERT netlink multicast group to read alerts. DM_NET alerting needs
-// to be stopped for this to work.
-//
-// `sw` and `hw` enable/disable software and hardware drop monitoring,
-// respectively; hardware drops are done by offload hardware rather than
-// kernel software.
+// Start puts DM_NET in packet alert mode (so we get alerts for each packet,
+// including the raw contents of the dropped packet), issues an acknowledged CMD_START
+// to start monitoring, and then joins the GRP_ALERT netlink multicast group to read alerts.
+// DM_NET alerts need to be stopped to work.
 func (s *Session) Start(sw, hw bool) error {
 	enc := netlink.NewAttributeEncoder()
-	enc.Flag(ATTR_SW_DROPS, sw)
-	enc.Flag(ATTR_HW_DROPS, hw)
+	enc.Flag(ATTR_SW_DROPS, sw) // Set software drop flag
+	enc.Flag(ATTR_HW_DROPS, hw) // Set hardware drop flag
 	raw, err := enc.Encode()
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
 
-	err = s.setPacketMode()
+	err = s.setPacketMode() // Set packet mode
 	if err != nil {
 		return fmt.Errorf("packet mode: %w", err)
 	}
 
-	err = s.req(CMD_START, raw, true)
+	err = s.req(CMD_START, raw, true) // Send start monitoring request
 	if err != nil {
 		return fmt.Errorf("req: %w", err)
 	}
 
-	// past here, Stop() alerting if anything fails.
-
+	// Stop alerts if this fails
 	_, _, err = s.conn.Receive()
 	if err != nil {
 		s.Stop(sw, hw)
 		return fmt.Errorf("req ack: %w", err)
 	}
 
-	err = s.conn.JoinGroup(GRP_ALERT)
+	err = s.conn.JoinGroup(GRP_ALERT) // Join alert group
 	if err != nil {
 		s.Stop(sw, hw)
 		return fmt.Errorf("join: %w", err)
@@ -223,25 +224,24 @@ func (s *Session) Start(sw, hw bool) error {
 	return nil
 }
 
-// Stop issues an ack'd CMD_STOP to turn off DM_NET alerting (`sw` is true
-// to disable software drops, and `hw` for hardware), and also leaves
-// the GRP_ALERT multicast group for the socket.
+// Stop sends an acknowledged CMD_STOP to turn off DM_NET alerts
+// (sw is true to disable software drops, hw is true to disable hardware drops),
+// and also leaves the GRP_ALERT multicast group.
 func (s *Session) Stop(sw, hw bool) error {
-	_ = s.conn.LeaveGroup(GRP_ALERT)
+	_ = s.conn.LeaveGroup(GRP_ALERT) // Leave alert group
 
-	// BUG(tqbf): log this or something, but if we ask this code to
-	// Stop(), I really want it to try to stop. Most of the time, we
-	// leave the multicast group simply by closing the connection.
+	// BUG(tqbf): Log this, but if we are asking this code to stop, I want it to try to stop.
+	// In most cases, we leave the multicast group simply by closing the connection.
 
 	enc := netlink.NewAttributeEncoder()
-	enc.Flag(ATTR_SW_DROPS, sw)
-	enc.Flag(ATTR_HW_DROPS, hw)
+	enc.Flag(ATTR_SW_DROPS, sw) // Set software drop flag
+	enc.Flag(ATTR_HW_DROPS, hw) // Set hardware drop flag
 	raw, err := enc.Encode()
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
 
-	err = s.req(CMD_STOP, raw, false)
+	err = s.req(CMD_STOP, raw, false) // Send stop monitoring request
 	if err != nil {
 		return fmt.Errorf("req: %w", err)
 	}
@@ -249,6 +249,7 @@ func (s *Session) Stop(sw, hw bool) error {
 	return nil
 }
 
+// decodeAlert decodes the alert
 func decodeAlert(raw []byte) (map[int]interface{}, error) {
 	dec, err := netlink.NewAttributeDecoder(raw)
 	if err != nil {
@@ -293,6 +294,9 @@ func decodeAlert(raw []byte) (map[int]interface{}, error) {
 		case ATTR_HW_ENTRIES:
 		case ATTR_HW_ENTRY:
 		case ATTR_HW_TRAP_COUNT:
+		case ATTR_FLOW_ACTION_COOKIE:
+		case ATTR_DROP_REASON: // New: Handle drop reason
+			ret[ATTR_DROP_REASON] = dec.String() // Assuming ATTR_DROP_REASON is defined
 		}
 	}
 
@@ -303,23 +307,24 @@ func decodeAlert(raw []byte) (map[int]interface{}, error) {
 	return ret, nil
 }
 
+// setPacketMode sets the packet mode
 func (s *Session) setPacketMode() error {
 	enc := netlink.NewAttributeEncoder()
-	enc.Uint8(ATTR_ALERT_MODE, ALERT_MODE_PACKET)
-	enc.Uint32(ATTR_TRUNC_LEN, 100)
-	enc.Uint32(ATTR_QUEUE_LEN, 4096)
+	enc.Uint8(ATTR_ALERT_MODE, ALERT_MODE_PACKET) // Set alert mode to packet
+	enc.Uint32(ATTR_TRUNC_LEN, 100)               // Set truncation length
+	enc.Uint32(ATTR_QUEUE_LEN, 4096)              // Set queue length
 
 	raw, err := enc.Encode()
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
 	}
 
-	err = s.req(CMD_CONFIG, raw, true)
+	err = s.req(CMD_CONFIG, raw, true) // Send configuration request
 	if err != nil {
 		return fmt.Errorf("req: %w", err)
 	}
 
-	_, _, err = s.conn.Receive()
+	_, _, err = s.conn.Receive() // Wait for acknowledgment
 	if err != nil {
 		return fmt.Errorf("req ack: %w", err)
 	}
@@ -327,23 +332,23 @@ func (s *Session) setPacketMode() error {
 	return nil
 }
 
-// PacketAlertFunc returns false if we should stop reading drops now.
+// PacketAlertFunc returns false if we should stop reading drops
 type PacketAlertFunc func(PacketAlert) bool
 
-// ReadUntil reads packet alerts until the deadline has elapsed, calling
-// `f` on each; read indefinitely if deadline is zero.
+// ReadUntil reads packet alerts until the deadline is reached, calling
+// `f` on each alert; if the deadline is zero, reads indefinitely.
 func (s *Session) ReadUntil(deadline time.Time, f PacketAlertFunc) error {
-	// BUG(tqbf): voodoo; i have no idea if this matters
-	s.conn.SetReadBuffer(4096)
+	// BUG(tqbf): voodoo; I don't know if this is important
+	s.conn.SetReadBuffer(4096) // Set read buffer size
 
 	for {
 		if !deadline.IsZero() {
-			s.conn.SetReadDeadline(deadline)
+			s.conn.SetReadDeadline(deadline) // Set read deadline
 		}
-		ms, _, err := s.conn.Receive()
+		ms, _, err := s.conn.Receive() // Receive messages
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-				// we're done reading
+				// We are done reading
 				return nil
 			}
 
@@ -352,19 +357,43 @@ func (s *Session) ReadUntil(deadline time.Time, f PacketAlertFunc) error {
 
 		for _, m := range ms {
 			if m.Header.Command != CMD_PACKET_ALERT {
-				continue
+				continue // Only process packet alerts
 			}
 
-			pa, err := PacketAlertFromRaw(m.Data)
+			pa, err := PacketAlertFromRaw(m.Data) // Create PacketAlert from raw data
 			if err != nil {
 				return fmt.Errorf("parse alert packet: %w", err)
 			}
 
 			if !f(pa) {
-				return nil
+				return nil // Stop reading if f returns false
 			}
 		}
 	}
+}
+
+// Helper function to determine the origin of the drop
+func getOrigin(pa *PacketAlert) string {
+	origin, ok := pa.attrs[ATTR_ORIGIN]
+	if !ok {
+		return "unknown" // Return unknown if not found
+	}
+	if origin.(uint16) == ORIGIN_SW {
+		return "software" // Return software if software drop
+	}
+	return "hardware" // Otherwise return hardware
+}
+
+// Helper function to determine the drop reason
+func getDropReason(pa *PacketAlert) string {
+	// Check if drop reason attribute is available
+	reason, ok := pa.attrs[ATTR_DROP_REASON] // Assuming ATTR_DROP_REASON is defined
+	if ok {
+		return reason.(string) // Return specific drop reason
+	}
+
+	// Return static reason if not available
+	return "UNSUPPORTED_FEATURE" // Return unsupported feature
 }
 
 // PacketAlert wraps the Netlink attributes parsed from a CMD_ALERT message
@@ -372,10 +401,9 @@ type PacketAlert struct {
 	attrs map[int]interface{}
 }
 
-// PacketAlertFromRaw creates a PacketAlert from the raw bytes of a CMD_ALERT
-// message.
+// PacketAlertFromRaw creates a PacketAlert from the raw bytes of a CMD_ALERT message.
 func PacketAlertFromRaw(raw []byte) (PacketAlert, error) {
-	attrs, err := decodeAlert(raw)
+	attrs, err := decodeAlert(raw) // Decode alert
 	if err != nil {
 		return PacketAlert{}, fmt.Errorf("decode: %w", err)
 	}
@@ -385,71 +413,69 @@ func PacketAlertFromRaw(raw []byte) (PacketAlert, error) {
 	}, nil
 }
 
-// Packet returns the (truncated) raw bytes of a dropped packet, starting
-// from the link layer header (which is ethernet-y?).
+// Packet returns the (truncated) raw bytes of the dropped packet, starting from the link layer header
+// (which might be an Ethernet header?).
 func (pa *PacketAlert) Packet() []byte {
 	payload, ok := pa.attrs[ATTR_PAYLOAD]
 	if !ok {
 		return nil
 	}
 
-	return payload.([]byte)
+	return payload.([]byte) // Return payload
 }
 
-// L3Packet returns the (truncated) raw bytes of a dropped packet, skipping
-// the link layer header (ie: starting at the IP header of an IP packet)
+// L3Packet returns the (truncated) raw bytes of the dropped packet, skipping the link layer header
+// (i.e., starting from the IP packet's IP header)
 func (pa *PacketAlert) L3Packet() []byte {
 	packet := pa.Packet()
 	if len(packet) <= 14 {
-		return nil
+		return nil // Return nil if packet length is less than or equal to 14
 	}
 
-	return packet[14:]
+	return packet[14:] // Return packet skipping link layer header
 }
 
-// Symbol returns the kernel function where this drop occurred, when available.
+// Symbol returns the kernel function where the drop occurred, when available.
 func (pa *PacketAlert) Symbol() string {
 	sym, ok := pa.attrs[ATTR_SYMBOL]
 	if !ok {
-		return ""
+		return "" // Return empty string if not found
 	}
 
-	return sym.(string)
+	return sym.(string) // Return symbol
 }
 
-// PC returns $RIP of the CPU when the drop occurred, for later resolution as a
-// symbol.
+// PC returns the $RIP of the CPU when the drop occurred, for later resolution to a symbol.
 func (pa *PacketAlert) PC() uint64 {
 	pc, ok := pa.attrs[ATTR_PC]
 	if !ok {
-		return 0
+		return 0 // Return 0 if not found
 	}
 
-	return pc.(uint64)
+	return pc.(uint64) // Return program counter
 }
 
 // Proto returns the layer 3 protocol of the dropped packet.
 func (pa *PacketAlert) Proto() uint16 {
 	proto, ok := pa.attrs[ATTR_PROTO]
 	if !ok {
-		return 0
+		return 0 // Return 0 if not found
 	}
 
-	return proto.(uint16)
+	return proto.(uint16) // Return protocol
 }
 
 // Is4 is true if the dropped packet is an IPv4 packet.
 func (pa *PacketAlert) Is4() bool {
-	return pa.Proto() == 0x0800
+	return pa.Proto() == 0x0800 // Check if protocol is IPv4
 }
 
 // Is16 is true if the dropped packet is an IPv6 packet.
 func (pa *PacketAlert) Is16() bool {
-	return pa.Proto() == 0x86DD
+	return pa.Proto() == 0x86DD // Check if protocol is IPv6
 }
 
-// Length returns the original, non-truncated length of the dropped
-// packet.
+// Length returns the original non-truncated length of the dropped packet.
 func (pa *PacketAlert) Length() uint32 {
 	l, ok := pa.attrs[ATTR_ORIG_LEN]
 	if !ok {
@@ -459,7 +485,7 @@ func (pa *PacketAlert) Length() uint32 {
 	return l.(uint32)
 }
 
-// Link returns the interface index on which the packet was dropped
+// Link returns the interface index of the dropped packet
 func (pa *PacketAlert) Link() uint32 {
 	l, ok := pa.attrs[ATTR_IN_PORT]
 	if !ok {
@@ -467,10 +493,26 @@ func (pa *PacketAlert) Link() uint32 {
 	}
 
 	a := l.(map[int]interface{})
-	lidx, ok := a[0]
+	lidx, ok := a[NATTR_PORT_NETDEV_IFINDEX]
 	if !ok {
 		return 0
 	}
 
-	return lidx.(uint32)
+	return lidx.(uint32) // Return interface index
+}
+
+func (pa *PacketAlert) Output(links map[uint32]string) {
+	// Log drop information
+	iface := fmt.Sprintf("%d", pa.Link())
+	if links != nil {
+		iface = links[pa.Link()]
+	}
+	log.Printf("drop at: %s:%016x", pa.Symbol(), pa.PC())
+	log.Printf("iface: %s", iface)
+	log.Printf("timestamp: %s",
+		time.Unix(0, int64(pa.attrs[ATTR_TIMESTAMP].(uint64))).Format("2006-01-02 15:04:05.000000"))
+	log.Printf("protocol: %s(0x%x)", EthTypeToString(pa.Proto()), pa.Proto())
+	log.Printf("drop reason: %s", getDropReason(pa))
+	log.Printf("origin: %s", getOrigin(pa))
+	log.Printf("length: %d", pa.Length())
 }
