@@ -12,6 +12,8 @@ go install github.com/smallnest/dropspy/cmd/dropspy@latest
 
 ## Usage
 
+![](./dropspy.png)
+
 ```bash
 ./dropspy: Report packet drops from Linux kernel DM_MON.
 ./dropspy [flags] [pcap filter]
