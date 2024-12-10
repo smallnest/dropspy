@@ -372,8 +372,8 @@ func (s *Session) ReadUntil(deadline time.Time, f PacketAlertFunc) error {
 	}
 }
 
-// Helper function to determine the origin of the drop
-func getOrigin(pa *PacketAlert) string {
+// GetOrigin is a helper function to determine the origin of the drop
+func GetOrigin(pa *PacketAlert) string {
 	origin, ok := pa.attrs[ATTR_ORIGIN]
 	if !ok {
 		return "unknown" // Return unknown if not found
@@ -384,8 +384,8 @@ func getOrigin(pa *PacketAlert) string {
 	return "hardware" // Otherwise return hardware
 }
 
-// Helper function to determine the drop reason
-func getDropReason(pa *PacketAlert) string {
+// GetDropReason is a helper function to determine the drop reason
+func GetDropReason(pa *PacketAlert) string {
 	// Check if drop reason attribute is available
 	reason, ok := pa.attrs[ATTR_DROP_REASON] // Assuming ATTR_DROP_REASON is defined
 	if ok {
@@ -512,7 +512,7 @@ func (pa *PacketAlert) Output(links map[uint32]string) {
 	log.Printf("timestamp: %s",
 		time.Unix(0, int64(pa.attrs[ATTR_TIMESTAMP].(uint64))).Format("2006-01-02 15:04:05.000000"))
 	log.Printf("protocol: %s(0x%x)", EthTypeToString(pa.Proto()), pa.Proto())
-	log.Printf("drop reason: %s", getDropReason(pa))
-	log.Printf("origin: %s", getOrigin(pa))
+	log.Printf("drop reason: %s", GetDropReason(pa))
+	log.Printf("origin: %s", GetOrigin(pa))
 	log.Printf("length: %d", pa.Length())
 }

@@ -93,6 +93,8 @@ func main() {
 
 		filter filter // Filter instance
 
+		summary bool // Summary flag
+
 		err error // Error variable
 	)
 
@@ -107,6 +109,7 @@ func main() {
 	pflag.BoolVar(&hw, "hw", true, "record hardware drops")                                                  // Record hardware drops
 	pflag.BoolVar(&sw, "sw", true, "record software drops")                                                  // Record software drops
 	pflag.BoolVar(&printHex, "hex", false, "print hex dumps of matching packets")                            // Print hex dumps of matching packets
+	pflag.BoolVar(&summary, "summary", false, "print summary of drops")                                      // Print summary of drops
 	// pflag.BoolP("help", "h", false, "")
 
 	// Set usage instructions
@@ -238,17 +241,45 @@ func main() {
 
 	dropCount := uint64(0) // Initialize drop count
 
+	var summaries = make(map[string]int)
+
+	defer func() {
+		if summary {
+			for k, v := range summaries {
+				fmt.Printf("%s: %d\n", k, v)
+			}
+		}
+	}()
+
+	start := time.Now()
 	for {
 		err = session.ReadUntil(deadline, func(pa dropspy.PacketAlert) bool {
 			if filter.Match(&pa) { // Check if packet matches filter conditions
 				dropCount += 1 // Increment drop count
 
-				// Record drop information
-				pa.Output(links)
-				if printHex {
-					fmt.Println(hex.Dump(pa.L3Packet())) // Print hex data
+				if summary {
+					key := fmt.Sprintf("%s (%016x) [%s] [%s]", pa.Symbol(), pa.PC(), dropspy.GetOrigin(&pa), dropspy.GetDropReason(&pa))
+					summaries[key] += 1
+
+					now := time.Now()
+					if now.Sub(start) > time.Second {
+						start = now
+						for k, v := range summaries {
+							if strings.HasSuffix(k, " []") {
+								k = k[:len(k)-3]
+							}
+							fmt.Printf("%d drops at %s\n", v, k)
+						}
+						summaries = make(map[string]int)
+					}
+				} else {
+					// Record drop information
+					pa.Output(links)
+					if printHex {
+						fmt.Println(hex.Dump(pa.L3Packet())) // Print hex data
+					}
+					log.Println("----------------") // Separator
 				}
-				log.Println("----------------") // Separator
 
 				if maxDrops != 0 && dropCount == maxDrops { // Check if maximum drop count is reached
 					fmt.Fprintf(os.Stderr, "maximum drops reached, exiting\n") // Print message
