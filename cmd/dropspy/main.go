@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
@@ -208,8 +209,8 @@ func main() {
 		os.Exit(1)                                               // Exit program
 	}
 
-	sigCh := make(chan os.Signal, 1)   // Create signal channel
-	signal.Notify(sigCh, os.Interrupt) // Listen for interrupt signal
+	sigCh := make(chan os.Signal, 1)                                       // Create signal channel
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT) // Listen for interrupt signal
 	go func() {
 		_ = <-sigCh                                                  // Wait for signal
 		fmt.Fprintf(os.Stderr, "got C-c: cleaning up and exiting\n") // Print cleanup message

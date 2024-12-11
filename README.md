@@ -31,7 +31,7 @@ ie: ./dropspy --hex -I eth0 udp port 53
       --xsym stringArray    exclude drops from syms matching regexp (may be repeated)
 ```
 
-You can only print the summary of drops per seconds:
+You can only print the summary of drops per second:
 
 ```bash
 ./dropspy --summary
